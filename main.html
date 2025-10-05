@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+    <title>Planet Runner</title>
+    <style>
+      * {
+        -webkit-user-select: none;
+        -moz-user-select: none;
+        user-select: none;
+      }
+      body {
+        margin: 0;
+        padding: 10px;
+        background: #000;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-height: 100vh;
+        font-family: Arial, sans-serif;
+      }
+      .container {
+        position: relative;
+        width: 100%;
+        max-width: 500px;
+        aspect-ratio: 2 / 3;
+        background: #000;
+      }
+      canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+        touch-action: none;
+      }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@farcade/game-sdk@0.2.1/dist/index.min.js"></script>
+  </head>
+  <body>
+    <div class="container">
+      <canvas id="game"></canvas>
+    </div>
+    <script>
+      const canvas = document.getElementById("game");
+      const ctx = canvas.getContext("2d");
+      let dpr = window.devicePixelRatio || 1;
+      let w, h;
+      let gameState = "over";
+      let gameTime = 0;
+      let lastTime = 0;
+      let transfers = 0;
+      let score = 0;
+      let difficulty = 0;
+      let muted = false;
+      let GM = 5000000;
+      let impulse = 200;
+      let ship = { x: 0, y: 0, vx: 0, vy: 0, r: 10 };
+      let vx=0;
+      let vy =0;
+      let planets = [];
+      let asteroids = [];
+      let stars = [];
+      let spawnTimer = 0;
+      let thrustSide = 0;
+      let thrustTimer = 0;
+      let targetOffsetX = 0; // смещение финальной планеты по горизонтали
+      let speed = 140;
+      let velocity = [];
+      let aimX = null;
+      let aimY = null;
+      let aiming = false;
+      let fallTimer = 0;       // глобальный таймер падения
+      let fallDuration = 1.5;  // сколько длится падение (сек)
+      let startPlanet;
+      let targetPlanet
+
+    canvas.addEventListener("mousemove", (e) => {
+      if (gameState !== "aiming") return; // траектория показывается только до старта
+      let rect = canvas.getBoundingClientRect();
+      aimX = (e.clientX - rect.left) * (w / rect.width);
+      aimY = (e.clientY - rect.top) * (h / rect.height);
+      aiming = true;
+    });
+
+    // Палитра планет (похожие на солнечную систему)
+    const planetColors = [
+      "#C2B280", // Меркурий (серо-бежевый)
+      "#E6D3B3", // Венера (желтовато-белый)
+      "#3D9BE9", // Земля (синий)
+      "#D14E28", // Марс (оранжево-красный)
+      "#E0C068", // Юпитер (бежево-жёлтый)
+      "#D6D1C4", // Сатурн (светло-бежевый)
+      "#5B8BD9", // Уран (голубой)
+      "#3253A1", // Нептун (синий)
+      "#FFD27F", // Солнце (жёлтый бонус)
+      
+      // Фантазийные
+      "#2ECC71", // зелёная
+      "#9B59B6", // фиолетовая
+      "#E74C3C"  // красная
+    ];
+
+    let lastColorIndex = -1; // запомним последний индекс
+
+    function getPlanetColor() {
+      let idx;
+      do {
+        idx = Math.floor(Math.random() * planetColors.length);
+      } while (idx === lastColorIndex && planetColors.length > 1);
+      lastColorIndex = idx;
+      return planetColors[idx];
+    }
+
+    function drawTrajectory(startX, startY, targetX, targetY) {
+        let dx = targetX - startX;
+        let dy = targetY - startY;
+
+        // сила старта (можно регулировать коэффициент)
+        
+        let dist = Math.sqrt(dx * dx + dy * dy);
+        vx = (dx / dist) * speed;
+        vy = (dy / dist) * speed;
+
+        ctx.strokeStyle = "rgba(0, 255, 0, 0.6)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(startX, startY);
+
+        let temp_x = startX;
+        let temp_y = startY;
+        let temp_vx = vx;
+        let temp_vy = vy;
+        let step_delta = 0.01;
+        let trajectory = []; // глобальная переменная
+        let finalPlanet = planets[planets.length - 1]; // последняя планета — финиш
+        let stopRadius = finalPlanet.r + 15; // радиус планеты + обводка
+
+        for (let i = 0; i < 3000; i++) {
+          let grav = computeGravity(temp_x, temp_y);
+          temp_vx += grav.ax * step_delta;
+          temp_vy += grav.ay * step_delta;
+          temp_x += temp_vx * step_delta;
+          temp_y += temp_vy * step_delta;
+
+                // проверка на столкновение с обводкой финальной планеты
+          let dx = finalPlanet.x - temp_x;
+          let dy = finalPlanet.y - temp_y;
+          let d = Math.sqrt(dx * dx + dy * dy);
+          if (d <= stopRadius) {
+            break; // прекращаем рисовать траекторию
+          }
+
+          if (temp_x < 0 || temp_x > w || temp_y < 0 || temp_y > h) break;
+          ctx.lineTo(temp_x, temp_y);
+        }
+
+        ctx.stroke();
+}
+
+      function resize() {
+        const clientW = canvas.clientWidth;
+        const clientH = canvas.clientHeight;
+        canvas.width = clientW * dpr;
+        canvas.height = clientH * dpr;
+        ctx.scale(dpr, dpr);
+        w = clientW;
+        h = clientH;
+        if (gameState === "playing") {
+          ship.x = Math.max(20, Math.min(w - 20, ship.x));
+          for (let p of planets) {
+            p.x = Math.max(p.r + 20, Math.min(w - p.r - 20, p.x));
+          }
+        }
+      }
+
+      function init() {
+        resize();
+        stars = [];
+        for (let i = 0; i < 100; i++) {
+            stars.push({ x: Math.random() * w, y: Math.random() * h });
+        }
+
+        // стартовая планета строго по центру снизу
+        startPlanet = { 
+          x: w / 2, 
+          y: h - 80,  
+          r: 20, 
+          color: getPlanetColor(),
+          isNew: true,
+        };
+
+        // финальная планета в верхней части
+        targetPlanet = { 
+          x: w / 2 + targetOffsetX,  
+          y: 100,  
+          r: 15, 
+          color: getPlanetColor(),
+          isNew: true,
+        };
+
+        planets = [startPlanet];
+        // добавляем промежуточные планеты равномерно по полосам
+        // делим экран на 4 равные части (по вертикали)
+        let zones = 4;
+        let zoneHeight = (h - 180) / zones; 
+        // 180 — запас сверху/снизу, чтобы старт/финиш не пересекались с промежуточными
+
+        let sideForI1 = null; // запомним сторону для первой линии
+
+        for (let i = 1; i < zones; i++) {
+          if (Math.random() < 0.7) {
+            let randY = 100 + i * zoneHeight; 
+
+            let randX;
+            if (i === 2) {
+              // средняя линия → ближе к центру
+              randX = w / 2 + (Math.random() - 0.5) * 50;
+            } else if (i === 1) {
+              // для первой линии случайно выбираем левую или правую сторону
+              if (Math.random() < 0.5) {
+                randX = w * 0.25 + Math.random() * (w * 0.2); // левая часть
+                sideForI1 = "left";
+              } else {
+                randX = w * 0.55 + Math.random() * (w * 0.2); // правая часть
+                sideForI1 = "right";
+              }
+            } else if (i === 3) {
+              // для третьей линии выбираем противоположную сторону от i=1
+              if (sideForI1 === "left") {
+                randX = w * 0.55 + Math.random() * (w * 0.2); // правая часть
+              } else if (sideForI1 === "right") {
+                randX = w * 0.25 + Math.random() * (w * 0.2); // левая часть
+              } else {
+                // если i=1 не было планеты (не сработал шанс), то случайная сторона
+                randX = w / 2 + (Math.random() - 0.5) * (w * 0.8);
+              }
+            }
+
+            let randR = 5 + Math.random() * 10;
+            let randColor = getPlanetColor();
+
+            planets.push({ x: randX, y: randY, r: randR, color: randColor ,
+          isNew: true});
+          }
+        }
+
+        // добавляем финальную сверху
+        planets.push(targetPlanet);
+        ship.x = startPlanet.x;
+        ship.y = startPlanet.y;
+        ship.vx = 0;
+        ship.vy = 0;
+
+        asteroids = [];
+        transfers = 0;
+        gameTime = 0;
+        score = 0;
+        difficulty = 0;
+        spawnTimer = 0;
+        thrustSide = 0;
+        thrustTimer = 0;
+        gameState = "aiming";
+        }
+
+
+      function computeGravity(x, y) {
+        let ax = 0, ay = 0;
+        for (let i = 0; i < planets.length; i++) {
+            let p = planets[i];
+            if (p === startPlanet) continue; // отключаем гравитацию нижней планеты
+            let dx = p.x - x;
+            let dy = p.y - y;
+            let dist2 = dx * dx + dy * dy;
+            if (dist2 < 1) dist2 = 1;
+            let dist = Math.sqrt(dist2);
+            let maxForce = 100; // подбери значение экспериментально
+            let softening = 500;
+            let force = GM / (dist2 + softening); // радиус смягчения;
+            if (force > maxForce) force = maxForce;
+            ax += (dx / dist) * force;
+            ay += (dy / dist) * force;}
+        return { ax, ay };
+        }
+      function update(currentTime) {
+          if (gameState === "scrolling") {
+            let delta = (currentTime - lastTime) / 1000 || 0;
+            lastTime = currentTime;
+            for (let s of stars) {
+              s.y += 30 * delta;
+              if (s.y > h) s.y -= h;
+            }
+
+            fallTimer += delta;
+            let t = Math.min(fallTimer / fallDuration, 1);
+
+            // easing cubic in-out
+            let ease = t < 0.5
+              ? 4 * t * t * t
+              : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+            let zoneHeight = (h - 180) / 4;
+            for (let p of planets) {
+              if (p.isNew) {
+                let targetY;
+                if (p === targetPlanet) {
+                  targetY = 100;         // финальная
+                } else if (p === startPlanet) {
+                  targetY = h - 80;      // стартовая
+                } else {
+                  targetY = 100 + p.zoneIndex * zoneHeight;
+                }
+                let startY = p.y;          // (уже = targetY - h при генерации)
+                let endY = targetY;      // куда должны встать
+                p.y = startY + (endY - startY) * ease;
+              } else {
+                // старые планеты: уезжают вниз
+                let startY = p.y;
+                let endY = p.y + h;
+                p.y = startY + (endY - startY) * ease;
+              }
+            }
+
+            ship.x = startPlanet.x;
+            ship.y = startPlanet.y;
+
+            if (t >= 1) {
+              // оставляем только новые
+              //planets = planets.filter(p => p.isNew);
+
+              // делаем их "старыми", сбрасываем флаги
+
+              gameState = "aiming";
+              fallTimer = 0;
+            }
+            return;
+          }
+
+        if (gameState === "aiming") {
+          let delta = (currentTime - lastTime) / 1000;
+          lastTime = currentTime;
+          gameTime += delta;
+          for (let s of stars) {
+          s.y += 30 * delta;
+          if (s.y > h) s.y -= h;
+        }
+        }
+
+
+        if (gameState !== "flying") return; // обновляем только в полёте
+        let delta = (currentTime - lastTime) / 1000;
+        lastTime = currentTime;
+        gameTime += delta;
+        difficulty = gameTime * 0.5 + transfers * 2;
+
+        if (thrustTimer > 0) {
+          thrustTimer -= delta;
+          if (thrustTimer <= 0) thrustSide = 0;
+        }
+        if (gameState !== "flying") return;
+
+        if (ship.stepIndex < trajectory.length) {
+            ship.x = trajectory[ship.stepIndex].x;
+            ship.y = trajectory[ship.stepIndex].y;
+            ship.stepIndex ++;
+        } else {
+            gameOver(); // траектория закончилась
+        }
+
+        // transfer check
+        let target = planets[planets.length - 1];
+        let dx = target.x - ship.x;
+        let dy = target.y - ship.y;
+        let dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist < target.r + 15 && gameState === "flying") {// --- после попадания на финальную планету ---
+          transfers++;
+          // Корабль в центр таргета
+          ship.x = target.x;
+          ship.y = target.y;
+
+          // старт новой зоны = финальная планета старого уровня
+          // --- при попадании на финальную планету ---
+          planets.forEach(p => p.isNew = false);
+          startPlanet = planets[planets.length - 1]; 
+          startPlanet.isNew = true;
+
+          // создаём новую зону выше на h
+          let newPlanets = [];
+          let zones = 4;
+          let zoneHeight = (h - 180) / zones;
+          let sideForI1 = null;
+
+          for (let i = 1; i < zones; i++) {
+            if (Math.random() < 0.7) {
+              let randY = 100 + i * zoneHeight - h; // <-- выше на h
+              let randX;
+
+              if (i === 2) {
+                randX = w / 2 + (Math.random() - 0.5) * 50;
+              } else if (i === 1) {
+                if (Math.random() < 0.5) {
+                  randX = w * 0.25 + Math.random() * (w * 0.2);
+                  sideForI1 = "left";
+                } else {
+                  randX = w * 0.55 + Math.random() * (w * 0.2);
+                  sideForI1 = "right";
+                }
+              } else if (i === 3) {
+                if (sideForI1 === "left") {
+                  randX = w * 0.55 + Math.random() * (w * 0.2);
+                } else if (sideForI1 === "right") {
+                  randX = w * 0.25 + Math.random() * (w * 0.2);
+                } else {
+                  randX = w / 2 + (Math.random() - 0.5) * (w * 0.8);
+                }
+              }
+
+              let randR = 5 + Math.random() * 10;
+              let randColor = getPlanetColor();
+              newPlanets.push({ x: randX, y: randY, r: randR, color: randColor, isNew: true, zoneIndex: i });
+            }
+          }
+
+          // финальная выше на h
+          targetPlanet = {
+            x: w / 2 + targetOffsetX,
+            y: 100 - h,
+            r: 15,
+            color: getPlanetColor(),
+            isNew: true
+          };
+          newPlanets.push(targetPlanet);
+
+          // добавляем новые планеты
+          planets.push(...newPlanets);
+
+          // переход в scrolling
+          gameState = "scrolling";
+          fallTimer = 0;
+
+          window.FarcadeSDK.singlePlayer.actions.hapticFeedback();
+
+        }
+
+        // stars
+        for (let s of stars) {
+          s.y += 30 * delta;
+          if (s.y > h) s.y -= h;
+        }
+
+        // score
+        score = transfers * 1000 + Math.floor(gameTime) * 5;
+      }
+
+      function draw() {
+        // background gradient
+
+        let gradient = ctx.createLinearGradient(0, 0, 0, h);
+        gradient.addColorStop(0, "#000011");
+        gradient.addColorStop(0.5, "#000022");
+        gradient.addColorStop(1, "#000033");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, w, h);
+
+        // stars
+        ctx.fillStyle = "white";
+        for (let s of stars) {
+          ctx.fillRect(s.x, s.y, 1, 1);
+        }
+
+        // planets
+        for (let p of planets) {
+          ctx.shadowColor = p.color;
+          ctx.shadowBlur = 30;
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.shadowBlur = 0;
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r + 15, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
+        // asteroids
+        ctx.fillStyle = "#666";
+        for (let a of asteroids) {
+          ctx.beginPath();
+          ctx.arc(a.x, a.y, a.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        if (gameState === "aiming" && aiming && aimX !== null && aimY !== null) {
+            drawTrajectory(ship.x, ship.y, aimX, aimY);
+            }
+
+        // ship
+        // сохраняем контекст
+        ctx.save();
+
+        // переносим систему координат в позицию корабля
+        ctx.translate(ship.x, ship.y);
+
+        // вычисляем угол направления полёта
+        if (gameState === "aiming") {
+            angle = Math.atan2(vy, vx);
+        } else {
+            if (ship.stepIndex > 0 && ship.stepIndex < trajectory.length) {
+                let prev = trajectory[ship.stepIndex - 1];
+                let curr = trajectory[ship.stepIndex];
+                let dx = curr.x - prev.x;
+                let dy = curr.y - prev.y;
+                angle = Math.atan2(dy, dx);
+            } else {
+                angle = 0; // запасной вариант
+            }
+        }
+        // поворачиваем, добавляем +90°, потому что треугольник нарисован вверх
+        ctx.rotate(angle + Math.PI / 2);
+
+        // тень
+        ctx.shadowColor = "#FFD700";
+        ctx.shadowBlur = 15;
+
+        // рисуем корабль в локальной системе координат (центр = 0,0)
+        ctx.fillStyle = "#FFFFFF";
+        ctx.beginPath();
+        ctx.moveTo(0, -12);   // нос
+        ctx.lineTo(-6, 6);    // левое крыло
+        ctx.lineTo(6, 6);     // правое крыло
+        ctx.closePath();
+        ctx.fill();
+
+        // сбрасываем тень
+        ctx.shadowBlur = 0;
+
+        // возвращаем контекст
+        ctx.restore();
+        // score
+        ctx.fillStyle = "white";
+        ctx.font = "bold 24px Arial";
+        ctx.fillText(`Score: ${Math.floor(score)}`, 20, 30);
+      }
+
+      function gameOver() {
+        gameState = "over";
+        window.FarcadeSDK.singlePlayer.actions.gameOver({ score: Math.floor(score) });
+      }
+
+      function loop(currentTime) {
+        update(currentTime);
+        draw();
+        requestAnimationFrame(loop);
+      }
+
+      canvas.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+
+      canvas.addEventListener("mousedown", (e) => {
+        if (gameState === "aiming" && e.button === 0 && aimX !== null && aimY !== null) {
+            // направление к курсору
+            trajectory = [];
+            let dx = aimX - ship.x;
+            let dy = aimY - ship.y;
+            let dist = Math.sqrt(dx * dx + dy * dy);
+
+            let vx = (dx / dist) * speed;
+            let vy = (dy / dist) * speed;
+
+            let temp_x = ship.x;
+            let temp_y = ship.y;
+            let temp_vx = vx;
+            let temp_vy = vy;
+            let step_delta = 0.05;
+
+            for (let i = 0; i < 3000; i++) {
+            let grav = computeGravity(temp_x, temp_y);
+            temp_vx += grav.ax * step_delta;
+            temp_vy += grav.ay * step_delta;
+            temp_x += temp_vx * step_delta;
+            temp_y += temp_vy * step_delta;
+            velocity.push({vx:temp_vx, vy:temp_vy});
+
+            trajectory.push({ x: temp_x, y: temp_y });
+            if (temp_x < 0 || temp_x > w || temp_y < 0 || temp_y > h) break;
+            }
+
+            gameState = "flying";
+            ship.stepIndex = 0;
+            }
+        }
+        );
+
+      // SDK
+      window.FarcadeSDK.on("play_again", () => {
+        init();
+      });
+
+      window.FarcadeSDK.on("toggle_mute", ({ isMuted }) => {
+        muted = isMuted;
+      });
+
+      // start
+      resize();
+      init();
+      window.FarcadeSDK.singlePlayer.actions.ready();
+      requestAnimationFrame(loop);
+    </script>
+  </body>
+</html>
